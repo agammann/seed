@@ -2,19 +2,28 @@
 import argparse, csv, hashlib, io, json, subprocess, sys, tempfile
 from pathlib import Path
 
-def load(path):
-    if path.suffix == '.json': data = json.loads(path.read_text(encoding='utf-8'))
+def load(path, original=None):
+    text = (path.read_bytes() if original is None else original).decode('utf-8')
+    if path.suffix == '.json':
+        data = json.loads(text)
     elif path.suffix == '.csv':
-        with path.open(encoding='utf-8', newline='') as f: data = list(csv.DictReader(f))
-    else: raise ValueError('input must be JSON or CSV')
+        reader = csv.DictReader(io.StringIO(text, newline=''))
+        header = reader.fieldnames
+        if not header or any(not name.strip() for name in header) or len(set(header)) != len(header):
+            raise ValueError('CSV needs a header with nonempty, unique field names')
+        data = list(reader)
+    else:
+        raise ValueError('input must be JSON or CSV')
     if not isinstance(data, list) or any(not isinstance(r, dict) or any(not isinstance(v, (str, int, float, bool, type(None))) for v in r.values()) for r in data): raise ValueError('expected flat records')
     return data
 
 def prepare(rows, policy):
+    if not isinstance(policy, dict):
+        raise ValueError('policy must be a JSON object')
     fields = policy.get('fields')
     if not isinstance(fields, dict) or not fields or any(v not in ('keep','replace') for v in fields.values()): raise ValueError('fields must map names to keep or replace')
     groups = policy.get('relationships', [])
-    if not isinstance(groups, list) or any(not isinstance(g,list) or len(g)<2 or any(f not in fields or fields[f]!='replace' for f in g) for g in groups): raise ValueError('invalid relationship groups')
+    if not isinstance(groups, list) or any(not isinstance(g,list) or len(g)<2 or any(not isinstance(f, str) or fields.get(f) != 'replace' for f in g) for g in groups): raise ValueError('invalid relationship groups')
     flat = [f for g in groups for f in g]
     if len(flat)!=len(set(flat)): raise ValueError('overlapping relationship groups')
     namespaces = {f: str(i) for i,g in enumerate(groups) for f in g}
@@ -43,27 +52,34 @@ def run(source, policy_path, output, command, timeout=5, budget=100):
     if timeout <= 0 or budget < 4: raise ValueError('timeout must be positive and budget at least 4')
     if command.count('{input}') != 1: raise ValueError('command needs exactly one {input} argument')
     if output.exists(): raise ValueError('output already exists')
-    rows=load(source); policy=json.loads(policy_path.read_text(encoding='utf-8')); candidate=prepare(rows,policy); calls=0
+    original = source.read_bytes()
+    rows = load(source, original)
+    policy = json.loads(policy_path.read_text(encoding='utf-8'))
+    candidate = prepare(rows, policy)
+    fields = policy['fields']
+    calls = 0
     with tempfile.TemporaryDirectory(prefix='seed-') as tmp:
         path=Path(tmp)/('candidate'+source.suffix)
-        def oracle(data, original=False):
+        def oracle(contents):
             nonlocal calls
-            calls += 1; path.write_bytes(encode(data,source.suffix,list(dict.fromkeys(k for r in rows for k in r)) if original else policy['fields']))
+            calls += 1
+            path.write_bytes(contents)
             try: p=subprocess.run([str(path) if a=='{input}' else a for a in command],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=timeout,shell=False)
             except (OSError,subprocess.TimeoutExpired) as e: raise ValueError('oracle failed or timed out') from e
             return p.returncode
-        baseline=oracle(rows, True)
+        baseline = oracle(original)
         if baseline<=0: raise ValueError('original did not produce a normal nonzero failure')
-        if oracle(rows, True)!=baseline: raise ValueError('original failure is unstable')
-        if oracle(candidate)!=baseline: raise ValueError('policy transformation changed failure')
+        if oracle(original) != baseline: raise ValueError('original failure is unstable')
+        if oracle(encode(candidate, source.suffix, fields)) != baseline: raise ValueError('policy transformation changed failure')
         i=0
         while i<len(candidate) and calls<budget-1:
             trial=candidate[:i]+candidate[i+1:]
-            if oracle(trial)==baseline: candidate=trial
+            if oracle(encode(trial, source.suffix, fields)) == baseline: candidate=trial
             else: i+=1
-        if oracle(candidate)!=baseline: raise ValueError('final failure is unstable')
+        fixture = encode(candidate, source.suffix, fields)
+        if oracle(fixture) != baseline: raise ValueError('final failure is unstable')
     output.mkdir(parents=True)
-    fixture=encode(candidate,source.suffix,policy['fields']); (output/('fixture'+source.suffix)).write_bytes(fixture)
+    (output/('fixture'+source.suffix)).write_bytes(fixture)
     receipt={'status':'REVIEW_REQUIRED','privacy_guarantee':False,'failure_exit_code':baseline,'oracle_calls':calls,'input_records':len(rows),'output_records':len(candidate),'fixture_sha256':hashlib.sha256(fixture).hexdigest(),'note':'Review all retained data and derived facts before sharing.'}
     (output/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n',encoding='utf-8'); return receipt
 

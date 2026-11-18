@@ -1,6 +1,6 @@
 # Seed
 
-Seed is an alpha, local-only CLI for making a smaller JSON or CSV fixture that still triggers a trusted failure test. It drops fields not explicitly listed, replaces selected values consistently, greedily removes records, and writes a receipt that requires human review. Python 3.10+; standard library only.
+Seed makes a smaller local JSON or CSV fixture for a failure you can check with a trusted test. It retains only selected fields, replaces selected values with consistent tokens, and tries removing records one at a time. It writes the resulting fixture and a review receipt. Seed requires Python 3.10 or newer and uses only the standard library.
 
 ## Try the synthetic example
 
@@ -9,15 +9,21 @@ python seed.py --trust-oracle examples/input.json examples/policy.json output --
 python -m unittest -v
 ```
 
-On Windows, use `"{input}"` instead of single quotes. Output must not already exist. Inspect `output/fixture.json` and `output/receipt.json` before sharing. The example contains fictional values only.
+Run from this directory and choose an unused output directory. In Windows Command Prompt, use `"{input}"`. The bundled example uses fictional values. You should see one retained row in `output/fixture.json` and a `REVIEW_REQUIRED` receipt in `output/receipt.json`. Inspect both files before sharing.
 
 ## Policy and oracle
 
-`fields` is an allowlist: each field is `keep` or `replace`; omitted fields are removed. Replacement assigns deterministic synthetic tokens to equal values. Optional `relationships` groups replacement fields that share a token namespace, preserving equality across those fields. It does not validate foreign keys or preserve types, ordering, formats, inequality, or more complex constraints.
+Set each field in the policy's `fields` object to `keep` or `replace`. Seed drops fields absent from the list. Replacement assigns equal values the same synthetic token within a field. Optional `relationships` lists groups of replacement fields that use the same tokens. Check any foreign-key relationships, type requirements, inequality or format constraints your test depends on.
 
-The oracle must be explicitly trusted: Seed executes it repeatedly without a shell, replacing one standalone `{input}` argument with a local temporary path. Write an oracle that returns a unique nonzero exit code **only** for the intended failure and zero otherwise. Seed compares the exit code twice on the original, after transformation, during reduction, and finally. It discards stdout and stderr. An ambiguous exit code, unrelated exception, or intermittent failure can give false evidence. Timeout and invocation count are bounded with `--timeout` and `--budget`, but subprocess descendants and side effects are not sandboxed. Use only tests you trust and isolate them yourself. Temporary files may contain the original input and are deleted on normal cleanup; interrupted runs or system backups may retain them.
+Use `--trust-oracle` only with a local test you trust. Seed runs it repeatedly without a shell and replaces one standalone `{input}` argument with a local temporary path. The test should return a distinct positive exit code for the intended failure and zero when the test passes. Seed checks the same original file bytes twice after detecting a failure. It compares the transformed fixture and each reduction trial against that baseline, then rechecks the exact output bytes. It uses only the exit code and discards the test's stdout and stderr. Similar exit codes, unrelated exceptions and intermittent failures can give false evidence.
 
-**This is not anonymization.** Kept fields, token patterns, counts, relationships, metadata and the failure itself can disclose private facts. Review every output and receipt before sharing. No upload or safety certification is provided. The receipt contains record counts, failure code and a fixture hash, all potentially sensitive. Choose an output location separate from the input and repository. JSON must be a top-level list of flat objects; CSV is flat. Greedy record removal is budget-limited and does not promise a globally minimal result. This is an experimental prototype, not proof of market fit or safety.
+`--timeout` bounds each invocation and `--budget` bounds the number of invocations. Seed leaves subprocess descendants and other side effects to your own isolation. Its temporary directory normally cleans up automatically. Interrupted runs or backups can retain copies of the original input.
+
+## Inputs and review
+
+Use UTF-8 JSON with a top-level list of flat objects, or UTF-8 CSV with a header of unique, nonempty field names. Choose an output location separate from the input and repository. Greedy removal works within the configured budget and can leave a fixture larger than the smallest possible result.
+
+**Field replacement offers no anonymization guarantee.** Kept fields, token patterns, relationships and the failure itself can disclose private facts. The receipt includes input and output counts, the failure code, and a fixture hash. Review both files before sharing them.
 
 ## Positioning
 
