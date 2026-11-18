@@ -17,6 +17,36 @@ class SeedTests(unittest.TestCase):
   with self.assertRaises(ValueError): seed.run(source,self.policy,self.p/'out',self.cmd)
  def test_invalid_relationship(self):
   with self.assertRaises(ValueError): seed.prepare([],{'fields':{'a':'keep','b':'replace'},'relationships':[['a','b']]})
+ def test_malformed_policy_is_rejected_cleanly(self):
+  with self.assertRaisesRegex(ValueError, 'policy must be a JSON object'):
+   seed.prepare([], [])
+  with self.assertRaisesRegex(ValueError, 'invalid relationship groups'):
+   seed.prepare([], {'fields': {'a': 'replace'}, 'relationships': [['a', []]]})
+
+ def test_ambiguous_csv_headers_are_rejected(self):
+  source = self.p / 'x.csv'
+  for content in ('bug,id,id\nyes,first,last\n', 'bug,\nyes,value\n', ''):
+   with self.subTest(content=content):
+    source.write_text(content, encoding='utf-8')
+    with self.assertRaisesRegex(ValueError, 'unique field names'):
+     seed.load(source)
+
+ def test_oracle_baseline_checks_the_exact_original_bytes(self):
+  source = self.p / 'compact.json'
+  original = b'[{"bug":"yes"}]'
+  source.write_bytes(original)
+  self.oracle.write_text(
+   'import json, sys\n'
+   'from pathlib import Path\n'
+   'data = Path(sys.argv[1]).read_bytes()\n'
+   'sys.exit(7 if b"\\n" in data and any(row.get("bug") == "yes" for row in json.loads(data)) else 0)\n',
+   encoding='utf-8',
+  )
+  with self.assertRaisesRegex(ValueError, 'original did not produce'):
+   seed.run(source, self.policy, self.p / 'out', self.cmd)
+  self.assertFalse((self.p / 'out').exists())
+  self.assertEqual(source.read_bytes(), original)
+
  def test_existing_output(self):
   source=self.p/'x.json'; source.write_text('[{"bug":"yes"}]'); (self.p/'out').mkdir()
   with self.assertRaises(ValueError): seed.run(source,self.policy,self.p/'out',self.cmd)
